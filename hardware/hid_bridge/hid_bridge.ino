@@ -1,5 +1,5 @@
-// HID bridge: an ESP32-S3 (XIAO, 8 MB PSRAM) plugged into the iPhone. It is the phone's
-// USB mouse + keyboard, an AirPlay screen-mirroring receiver, and a BLE peripheral for the
+// HID bridge: an ESP32-S3 (XIAO, 8 MB PSRAM) next to the iPhone. It is the phone's
+// USB or Bluetooth mouse + keyboard, an AirPlay screen-mirroring receiver, and a BLE peripheral for the
 // iOS app on the same phone. It holds no logic; the app decides. Protocol: docs/ble-protocol.md.
 //
 // HID commands (unchanged from the old TCP protocol, the board answers "ok" or "err <why>"):
@@ -25,11 +25,16 @@
 #include "version.h"
 #include "src/airplay/airplay.h"
 #include "src/hid/arbiter.h"
+#include "src/hid/hid_report.h"
 #include "logbuf.h"
 
 const int STEP = 10;      // max pointer delta per report while moving
 const int STEP_MS = 8;    // report interval; constant pace keeps iOS acceleration predictable
 const int HOME_REPORTS = 50;
+const int BLE_STEP_MS = 15;  // one report per BLE connection event (ble_link.cpp: 15 ms interval)
+#ifndef BLE_HID_ONLY
+#define BLE_HID_ONLY 0  // flash.sh --ble-hid: Bluetooth even with USB plugged in, to drive the phone from a Mac's serial
+#endif
 #ifndef DEBUG_SERIAL
 #define DEBUG_SERIAL 0  // 1: echo commands and the AirPlay handshake over USB serial
 #endif
@@ -42,13 +47,84 @@ USBHIDConsumerControl consumer;
 const uint16_t AC_HOME = 0x0223;  // HID consumer page: AC Home
 static String receiverName = "ESP32 Agent";
 
+// Plugged in over USB, the board is that host's mouse + keyboard; otherwise the bonded phone's over Bluetooth.
+static bool hidOverBle() { return BLE_HID_ONLY || !tud_mounted(); }
+
+static hid_keyboard bleKeys;
+static uint8_t bleButtons;
+static bool bleFailed;  // a report didn't get out since run() started
+
+static void bleSend(BleHidReport r, const uint8_t *p, size_t n) {
+  if (!ble_hid_send(r, p, n)) bleFailed = true;
+}
+
+static void hidMouseMove(int x, int y, int wheel = 0, int pan = 0) {
+  if (!hidOverBle()) { mouse.move(x, y, wheel, pan); return; }
+  uint8_t m[HID_MOUSE_LEN];
+  hid_mouse_report(m, bleButtons, x, y, wheel, pan);
+  bleSend(BLE_HID_MOUSE, m, sizeof m);
+}
+
+static void hidMouseButton(bool down) {
+  if (!hidOverBle()) { if (down) mouse.press(MOUSE_LEFT); else mouse.release(MOUSE_LEFT); return; }
+  bleButtons = down ? MOUSE_LEFT : 0;
+  hidMouseMove(0, 0);
+}
+
+static void hidKeyPress(uint8_t code) {
+  if (!hidOverBle()) { keyboard.press(code); return; }
+  if (hid_keyboard_press(&bleKeys, code)) bleSend(BLE_HID_KEYBOARD, bleKeys.report, HID_KEYBOARD_LEN);
+}
+
+static void hidKeysRelease() {
+  if (!hidOverBle()) { keyboard.releaseAll(); return; }
+  hid_keyboard_clear(&bleKeys);
+  bleSend(BLE_HID_KEYBOARD, bleKeys.report, HID_KEYBOARD_LEN);
+}
+
+static void hidType(const String &text) {
+  if (!hidOverBle()) { keyboard.print(text); return; }
+  for (size_t i = 0; i < text.length() && !bleFailed; i++) {
+    if (!hid_ascii_usage(text[i])) continue;  // like USB: ASCII only
+    hidKeyPress((uint8_t)text[i]);
+    delay(BLE_STEP_MS);
+    hidKeysRelease();
+    delay(BLE_STEP_MS);
+    esp_task_wdt_reset();  // 512 characters take longer than the watchdog
+  }
+}
+
+static void hidHomeKey() {
+  if (!hidOverBle()) { consumer.press(AC_HOME); delay(40); consumer.release(); return; }
+  uint8_t c[HID_CONSUMER_LEN];
+  hid_consumer_report(c, AC_HOME);
+  bleSend(BLE_HID_CONSUMER, c, sizeof c);
+  delay(40);
+  hid_consumer_report(c, 0);
+  bleSend(BLE_HID_CONSUMER, c, sizeof c);
+}
+
+// Let go of everything on the Bluetooth route: a link or route that went away may have left a button or key held.
+static void bleReleaseAll() {
+  bleButtons = 0;
+  hid_keyboard_clear(&bleKeys);
+  uint8_t m[HID_MOUSE_LEN], c[HID_CONSUMER_LEN];
+  hid_mouse_report(m, 0, 0, 0, 0, 0);
+  hid_consumer_report(c, 0);
+  bleSend(BLE_HID_MOUSE, m, sizeof m);
+  bleSend(BLE_HID_KEYBOARD, bleKeys.report, HID_KEYBOARD_LEN);
+  bleSend(BLE_HID_CONSUMER, c, sizeof c);
+}
+
 void movePaced(long dx, long dy) {
+  bool ble = hidOverBle();
   while (dx || dy) {
     int sx = constrain(dx, -STEP, STEP), sy = constrain(dy, -STEP, STEP);
-    mouse.move(sx, sy);
+    hidMouseMove(sx, sy);
     dx -= sx;
     dy -= sy;
-    delay(STEP_MS);
+    delay(ble ? BLE_STEP_MS : STEP_MS);
+    if (ble) esp_task_wdt_reset();  // a long move at this pace can outlast the watchdog
   }
 }
 
@@ -73,11 +149,11 @@ bool pressCombo(String combo) {
   combo += '+';
   for (int i; (i = combo.indexOf('+')) >= 0; combo = combo.substring(i + 1)) {
     uint8_t c = keyCode(combo.substring(0, i));
-    if (!c) { keyboard.releaseAll(); return false; }
-    keyboard.press(c);
+    if (!c) { hidKeysRelease(); return false; }
+    hidKeyPress(c);
   }
   delay(30);
-  keyboard.releaseAll();
+  hidKeysRelease();
   return true;
 }
 
@@ -99,20 +175,23 @@ String run(const String &line) {
   sscanf(arg.c_str(), "%ld %ld", &a, &b);
 
   if (cmd == "ping") return "ok";
-  if (!usbReady()) return "err phone usb asleep (unlock the phone)";
+  bool ble = hidOverBle();
+  if (ble ? !ble_hid_ready() : !usbReady())
+    return ble ? "err phone bluetooth not connected (pair the board in Settings)" : "err phone usb asleep (unlock the phone)";
+  bleFailed = false;
+  String reply = "err unknown command";
   if (cmd == "home") {  // slam the pointer into the top-left corner
-    for (int i = 0; i < HOME_REPORTS; i++) { mouse.move(-127, -127); delay(2); }
-    return "ok";
-  }
-  if (cmd == "move") { movePaced(a, b); return "ok"; }
-  if (cmd == "press") { mouse.press(MOUSE_LEFT); return "ok"; }
-  if (cmd == "release") { mouse.release(MOUSE_LEFT); return "ok"; }
-  if (cmd == "click") { mouse.press(MOUSE_LEFT); delay(60); mouse.release(MOUSE_LEFT); return "ok"; }
-  if (cmd == "scroll") { mouse.move(0, 0, a, b); return "ok"; }
-  if (cmd == "type") { keyboard.print(arg); return "ok"; }
-  if (cmd == "key") return pressCombo(arg) ? "ok" : "err unknown key";
-  if (cmd == "homescreen") { consumer.press(AC_HOME); delay(40); consumer.release(); return "ok"; }
-  return "err unknown command";
+    for (int i = 0; i < HOME_REPORTS; i++) { hidMouseMove(-127, -127); delay(ble ? BLE_STEP_MS : 2); }
+    reply = "ok";
+  } else if (cmd == "move") { movePaced(a, b); reply = "ok";
+  } else if (cmd == "press") { hidMouseButton(true); reply = "ok";
+  } else if (cmd == "release") { hidMouseButton(false); reply = "ok";
+  } else if (cmd == "click") { hidMouseButton(true); delay(60); hidMouseButton(false); reply = "ok";
+  } else if (cmd == "scroll") { hidMouseMove(0, 0, a, b); reply = "ok";
+  } else if (cmd == "type") { hidType(arg); reply = "ok";
+  } else if (cmd == "key") { reply = pressCombo(arg) ? "ok" : "err unknown key";
+  } else if (cmd == "homescreen") { hidHomeKey(); reply = "ok"; }
+  return ble && bleFailed && reply == "ok" ? "err bluetooth report not sent" : reply;
 }
 
 static arb_state arb;  // the app or the CLI drives the phone, never both: src/hid/arbiter.h
@@ -139,8 +218,14 @@ const char *resetReason() {
   }
 }
 
+// "usb" in the status: can the board drive its host right now, over either route.
+const char *hidRoute() {
+  if (!hidOverBle()) return "usb";
+  return ble_hid_ready() ? "ble" : "off";
+}
+
 const char *usbState() {
-  if (!tud_mounted()) return "off";
+  if (hidOverBle()) return ble_hid_ready() ? "ok" : "off";
   return tud_suspended() ? "asleep" : "ok";
 }
 
@@ -224,12 +309,12 @@ String statusJson(bool full, char who) {
   VideoStats v = video_stats(who);
   char s[560];
   snprintf(s, sizeof s,
-           "{\"fw\":\"%s\",\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"net\":\"%s\",\"ip\":\"%s\",\"sta\":%d,"
+           "{\"fw\":\"%s\",\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"hid\":\"%s\",\"net\":\"%s\",\"ip\":\"%s\",\"sta\":%d,"
            "\"ap\":\"%s\",\"w\":%u,\"h\":%u,\"kbps\":%lu,\"fps\":%.1f,\"idr\":%lu,\"gop\":%lu,\"vage\":%lu,\"ovf\":%lu,\"fz\":%d,"
            "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d},"
            "\"udp\":{\"n\":%d,\"kbps\":%lu,\"nack\":%lu,\"drop\":%lu}}",
            FW_VERSION, millis(), resetReason(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usbState(), net_mode(), net_ip().c_str(), net_peers(),
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usbState(), hidRoute(), net_mode(), net_ip().c_str(), net_peers(),
            apStates[airplay_state()], cfg_width(), cfg_height(), (unsigned long)v.kbps, v.fps, (unsigned long)v.idr_ms,
            (unsigned long)v.gop_bytes, (unsigned long)v.age_ms, (unsigned long)v.overflows, v.frozen, ble_mtu(), ble_phy(), (unsigned long)ble_kbps(), (unsigned long)ble_drops(),
            (unsigned long)ble_reply_drops(), ble_peers(), wv_active(), (unsigned long)wv_kbps(),
@@ -245,8 +330,8 @@ String statusJson(bool full, char who) {
   }
   if (full) return s;
   // MTU below ~250 (before the MTU exchange): keep only the fields the app needs to stay alive
-  snprintf(s, sizeof s, "{\"fw\":\"%s\",\"up\":%lu,\"rst\":\"%s\",\"usb\":\"%s\",\"net\":\"%s\",\"ap\":\"%s\",\"fz\":%d,\"ble\":{\"mtu\":%u}",
-           FW_VERSION, millis(), resetReason(), usbState(), net_mode(), apStates[airplay_state()], v.frozen, ble_mtu());
+  snprintf(s, sizeof s, "{\"fw\":\"%s\",\"up\":%lu,\"rst\":\"%s\",\"usb\":\"%s\",\"hid\":\"%s\",\"net\":\"%s\",\"ap\":\"%s\",\"fz\":%d,\"ble\":{\"mtu\":%u}",
+           FW_VERSION, millis(), resetReason(), usbState(), hidRoute(), net_mode(), apStates[airplay_state()], v.frozen, ble_mtu());
   snprintf(s + strlen(s), sizeof s - strlen(s), ",\"owner\":\"%s\"", owner);
   if (who == FROM_CLI) snprintf(s + strlen(s), sizeof s - strlen(s), ",\"busy\":%d", app);
   strlcat(s, "}", sizeof s);
@@ -343,12 +428,20 @@ void loop() {
   // A gesture cut off mid-way must not leave the button held (long press); only the side that went holds it.
   bool app = ble_app_connected(), appActive = ble_app_active();
   if (linked && !app) {
-    if (arb_gone(&arb, ARB_APP)) mouse.release(MOUSE_LEFT);
-    keyboard.releaseAll();
+    if (arb_gone(&arb, ARB_APP)) hidMouseButton(false);
+    hidKeysRelease();
     video_stream(false, FROM_APP);
   }
+  // iOS keeps the Bluetooth mouse's link up without the app: a crashed app must not leave the button held either.
+  if (app && !ble_app_alive() && arb_gone(&arb, ARB_APP)) hidMouseButton(false);
+  // A new link or a change of route starts with nothing held on Bluetooth (USB let go when its host went away).
+  static bool hidWasBle = false, hidWasReady = false;
+  bool hidBle = hidOverBle(), hidReady = ble_hid_ready();
+  if (hidReady && (!hidWasReady || hidWasBle != hidBle)) bleReleaseAll();
+  hidWasBle = hidBle;
+  hidWasReady = hidReady;
   if (cliLinked && !cli) {
-    if (arb_gone(&arb, ARB_CLI)) mouse.release(MOUSE_LEFT);
+    if (arb_gone(&arb, ARB_CLI)) hidMouseButton(false);
     video_stream(false, FROM_CLI);
   }
   // The app wins: a CLI session up alongside it stops at once and is dropped shortly after, once its status
@@ -356,7 +449,7 @@ void loop() {
   static uint32_t cliDropAt = 0;
   if (appActive && cli) {
     if (!cliDropAt) {
-      if (arb_gone(&arb, ARB_CLI)) mouse.release(MOUSE_LEFT);
+      if (arb_gone(&arb, ARB_CLI)) hidMouseButton(false);
       video_stream(false, FROM_CLI);
       ble_cli_status(statusJson(true, FROM_CLI), statusJson(false, FROM_CLI));
       cliDropAt = millis() + 300;

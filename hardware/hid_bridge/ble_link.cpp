@@ -12,16 +12,18 @@
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <NimBLEDevice.h>
+#include <NimBLEHIDDevice.h>
 #include "nimble/nimble/host/include/host/ble_hs.h"
 #include "netcfg.h"
 #include "cli_link.h"
 #include "src/cli/cli_proto.h"
+#include "src/hid/hid_report.h"
 #include "logbuf.h"
 
 static_assert(MYNEWT_VAL(MSYS_1_BLOCK_COUNT) == 64 && MYNEWT_VAL(MSYS_1_BLOCK_SIZE) == 320,
               "nimble_cfg.h not applied: build with hardware/flash.sh");
 static_assert(MYNEWT_VAL(MSYS_2_BLOCK_COUNT) == 0 && MYNEWT_VAL(BLE_TRANSPORT_ACL_FROM_LL_COUNT) == 24, "nimble_cfg.h");
-static_assert(MYNEWT_VAL(BLE_STORE_MAX_BONDS) == 8, "nimble_cfg.h: bond slots");
+static_assert(MYNEWT_VAL(BLE_STORE_MAX_BONDS) == 8 && MYNEWT_VAL(BLE_STORE_MAX_CCCDS) == 64, "nimble_cfg.h: bond slots");
 static_assert(MYNEWT_VAL(BLE_ATT_PREFERRED_MTU) == 517 && MYNEWT_VAL(BLE_HS_LOG_LVL) == 5, "nimble_cfg.h");
 static_assert(MYNEWT_VAL(BLE_MAX_CONNECTIONS) == 5 && !MYNEWT_VAL(BLE_ROLE_OBSERVER), "nimble_cfg.h: handles");
 static_assert(!MYNEWT_VAL(BLE_EXT_ADV), "nimble_cfg.h: one legacy advertising set");
@@ -32,6 +34,7 @@ const size_t CMD_MAX = 512;
 const size_t TEXT_MAX = 514;               // MTU 517 - 3
 const uint32_t VIDEO_TIMEOUT_MS = 1500;    // a full buffer waits; only a stalled link drops the chunk
 const uint32_t REPLY_TIMEOUT_MS = 3000;    // replies retry this long (video is paused meanwhile)
+const uint32_t HID_TIMEOUT_MS = 200;      // an input report that waits longer than this is stale: the app re-homes
 const uint32_t STATUS_TIMEOUT_MS = 500;    // a newer status replaces it a second later anyway
 const int MBUF_RESERVE = 16;               // of 64 msys blocks; video never takes these
 const int VIDEO_CTRL_PKTS = 8;             // ACL packets video may have in the controller while commands flow
@@ -47,7 +50,7 @@ const uint32_t PLAIN_GRACE_MS = 15000;     // a link neither encrypted (app) nor
 enum AdvId { ADV_NONE, ADV_APP, ADV_CLI };
 const uint32_t ADV_CYCLE_MS = 1000, ADV_CLI_MS = 250;
 
-enum { CH_REPLY, CH_STATUS, CH_VIDEO, CH_CLI, CH_COUNT };
+enum { CH_REPLY, CH_STATUS, CH_VIDEO, CH_CLI, CH_HID_KEYBOARD, CH_HID_CONSUMER, CH_HID_MOUSE, CH_COUNT };
 
 struct Text {
   char dest;  // FROM_APP or FROM_CLI: whose reply this is
@@ -73,6 +76,9 @@ static volatile uint32_t appSeenMs;  // last command from the app that drives th
 // An app that only pings (every 2 s, in the background too) and logs is idle and lets the CLI in; its next real
 // command takes the board back (2026-10-21: the app in the background held the board for good).
 const uint32_t APP_IDLE_MS = 10000;
+// The app pings every 2 s, in the background too; a ping can take a few seconds on a busy link.
+const uint32_t APP_ALIVE_MS = 8000;
+static volatile uint32_t appWroteMs;  // last write of any kind from the app
 
 // "<id> <command>": anything but ping, log and the keep-awake nudge (move 1 0, move -1 0) is the app at work.
 static bool appWorks(const String &line) {
@@ -87,8 +93,7 @@ static bool appWorks(const String &line) {
 #define BLE_LOG(...) ((void)0)
 #endif
 
-// New phones may pair only this long after power-on (the board is powered by the phone it plugs into, so
-// setup always falls in it). Later, only phones bonded before can connect: nobody nearby can pair and drive it.
+// New phones may pair only this long after power-on (on a charger or power bank: power-cycle the board to pair). Later, only phones bonded before can connect: nobody nearby can pair and drive it.
 const uint32_t PAIR_WINDOW_MS = 3 * 60 * 1000;
 static uint32_t pairOpened;  // power-on, or the last unpair
 static NimBLEAddress known[8];  // bonds at boot plus those made in the window
@@ -200,6 +205,7 @@ class CharCb : public NimBLECharacteristicCallbacks {
     if (!ci.isEncrypted()) return;
     if (c == netChar) { net_request(v); return; }
     v.trim();
+    appWroteMs = millis() | 1;
     if (appWorks(v)) appSeenMs = millis() | 1;
     ble_push_cmd(FROM_APP, v.c_str(), v.length());
   }
@@ -212,7 +218,7 @@ class CharCb : public NimBLECharacteristicCallbacks {
     int i = indexOf(c), p = sub & 1 ? slotFor(ci.getConnHandle()) : slotOf(ci.getConnHandle());
     if (i >= 0 && p >= 0) subscribed[p][i] = sub & 1;
     BLE_LOG("conn %u: %s %s\n", ci.getConnHandle(), sub & 1 ? "subscribed" : "unsubscribed",
-            i == CH_REPLY ? "reply" : i == CH_STATUS ? "status" : i == CH_VIDEO ? "video" : "cli");
+            i == CH_REPLY ? "reply" : i == CH_STATUS ? "status" : i == CH_VIDEO ? "video" : i == CH_CLI ? "cli" : i >= 0 ? "hid" : "other");
   }
 };
 
@@ -372,7 +378,10 @@ static void advertise() {
 
 static void setUpAdvertising(const std::string &name) {
   for (auto *d : {&appAdv, &cliAdv}) d->setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
-  appAdv.setCompleteServices(NimBLEUUID(UUID("0000")));
+  // The app finds the board by its own service, iOS Settings lists it as a mouse + keyboard by the HID one.
+  appAdv.addServiceUUID(NimBLEUUID(UUID("0000")));
+  appAdv.addServiceUUID(NimBLEUUID((uint16_t)0x1812));
+  appAdv.setAppearance(HID_KEYBOARD);
   cliAdv.setCompleteServices(NimBLEUUID(UUID("0010")));
   NimBLEAdvertisementData scan;
   scan.setName(name);
@@ -425,6 +434,16 @@ void ble_begin(const String &name) {
   NimBLEService *cliSvc = server->createService(UUID("0010"));
   cliIn = cliSvc->createCharacteristic(UUID("0011"), NIMBLE_PROPERTY::WRITE, CMD_MAX + 64);
   chars[CH_CLI] = cliSvc->createCharacteristic(UUID("0012"), NIMBLE_PROPERTY::NOTIFY);
+  NimBLEHIDDevice *hid = new NimBLEHIDDevice(server);
+  hid->setManufacturer("ESP32 Agent");
+  hid->setPnp(0x02, 0x303A, 0x4001, 0x0100);  // USB vendor id: Espressif
+  hid->setHidInfo(0x00, 0x01);
+  hid->setReportMap((uint8_t *)hid_report_map, hid_report_map_len);
+  hid->setBatteryLevel(100);
+  chars[CH_HID_KEYBOARD] = hid->getInputReport(HID_REPORT_KEYBOARD);
+  chars[CH_HID_CONSUMER] = hid->getInputReport(HID_REPORT_CONSUMER);
+  chars[CH_HID_MOUSE] = hid->getInputReport(HID_REPORT_MOUSE);
+  hid->getOutputReport(HID_REPORT_KEYBOARD);  // the LEDs: iOS may write them, nothing reads them
   cliIn->setCallbacks(&charCb);
   cmd->setCallbacks(&charCb);
   netChar->setCallbacks(&charCb);
@@ -449,6 +468,8 @@ bool ble_app_connected() {
     if (encrypted(peers[i])) return true;
   return false;
 }
+
+bool ble_app_alive() { return appWroteMs && millis() - appWroteMs < APP_ALIVE_MS && ble_app_connected(); }
 
 bool ble_app_active() { return appSeenMs && millis() - appSeenMs < APP_IDLE_MS && ble_app_connected(); }
 
@@ -551,6 +572,20 @@ void ble_unpair() {
   for (int i = 0; i < MAX_PEERS; i++)
     if (peers[i] >= 0) { server->disconnect(peers[i]); any = true; }  // onDisconnect restarts advertising
   if (!any) advertise();
+}
+
+bool ble_hid_ready() {
+  for (int i = 0; i < MAX_PEERS; i++)
+    if (subscribed[i][CH_HID_MOUSE] && encrypted(peers[i])) return true;
+  return false;
+}
+
+bool ble_hid_send(BleHidReport r, const uint8_t *p, size_t n) {
+  int ch = r == BLE_HID_KEYBOARD ? CH_HID_KEYBOARD : r == BLE_HID_CONSUMER ? CH_HID_CONSUMER : CH_HID_MOUSE;
+  ctrlPending++;  // video yields to input
+  bool ok = notifyRaw(ch, p, n, HID_TIMEOUT_MS);
+  ctrlPending--;
+  return ok;
 }
 
 // Hooks for cli_link.cpp.

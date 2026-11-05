@@ -4,6 +4,7 @@
 #   --debug       log commands and the AirPlay handshake on USB serial
 #   --sta         test build: join the Wi-Fi in hid_bridge/secrets.h instead of opening a hotspot
 #   --build-only  compile only (prints flash/RAM usage)
+#   --ble-hid     test build: mouse and keyboard always over Bluetooth; USB only for power and serial commands
 #   --ap-tune     A/B build: hotspot on a 20 MHz channel with 300 TU beacons (more airtime for BLE)
 # BLE host: h2zero NimBLE-Arduino (arduino-cli lib install "NimBLE-Arduino"); its buffer sizes live in
 # hid_bridge/nimble_cfg.h, force-included into every C/C++ file below.
@@ -20,6 +21,7 @@ for a in "$@"; do
     --sta) [[ -f hid_bridge/secrets.h ]] || { echo "--sta needs hid_bridge/secrets.h (see secrets.example.h)"; exit 1; }
            DEFS+=" -DSTA_FROM_SECRETS=1" ;;
     --build-only) BUILD_ONLY=1 ;;
+    --ble-hid) DEFS+=" -DBLE_HID_ONLY=1" ;;
     --ap-tune) DEFS+=" -DAP_TUNE=1" ;;
     --crash-test) DEFS+=" -DOTA_CRASH_TEST=1" ;;  # build only, then push it with ota_push.py
     --small-gop) DEFS+=" -DGOP_CAP_KB=256" ;;  # test build: the GOP fills (freezes) within minutes

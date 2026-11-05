@@ -35,9 +35,10 @@
 #undef CONFIG_BT_NIMBLE_MAX_BONDS
 #define CONFIG_BT_NIMBLE_MAX_BONDS 8
 #define MYNEWT_VAL_BLE_STORE_MAX_BONDS 8
+// 8 subscriptions per bond: reply, status, video, CLI, three HID input reports, battery.
 #undef CONFIG_BT_NIMBLE_MAX_CCCDS
-#define CONFIG_BT_NIMBLE_MAX_CCCDS 48
-#define MYNEWT_VAL_BLE_STORE_MAX_CCCDS 48
+#define CONFIG_BT_NIMBLE_MAX_CCCDS 64
+#define MYNEWT_VAL_BLE_STORE_MAX_CCCDS 64
 // One legacy advertising set (ble_link.cpp): extended advertising also turns on the controller's BLE 5.0 features,
 // ~9 KB of internal RAM in all (measured 2026-10-21).
 #undef CONFIG_BT_NIMBLE_EXT_ADV

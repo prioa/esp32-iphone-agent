@@ -2,6 +2,9 @@
 
 ## Unreleased (main)
 
+- Firmware 0.3.0, experimental: without a USB host the board is the paired phone's Bluetooth mouse and keyboard (HID over
+  GATT), so a charger or power bank is enough. USB works as before and takes priority. New status field `hid`; `usb` now
+  means the active route can drive the phone.
 - DeepSeek Harness plugin (`integrations/dsh`, npm `dsh-esp32agent`): the esp32agent MCP server plus the
   handsy skill as a dsh bundle. Uses esp32agent 0.1.2 (CLI binary v0.1.1: empty `required` arrays, #77).
 - Siri AI developer preview (off by default, see `docs/siri-ai-app-intents.md`): tool intents to run a

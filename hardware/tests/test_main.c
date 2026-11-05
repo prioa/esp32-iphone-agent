@@ -8,6 +8,7 @@
 #include "../hid_bridge/src/airplay/keystream.h"
 #include "../hid_bridge/src/cli/cli_proto.h"
 #include "../hid_bridge/src/hid/arbiter.h"
+#include "../hid_bridge/src/hid/hid_report.h"
 #include "../hid_bridge/src/log/logring.h"
 #include "mdns.h"  // stubs/: the host stand-in for ESP-IDF mdns
 #include "../hid_bridge/src/airplay/ap_internal.h"
@@ -395,6 +396,64 @@ static void test_mdns(void) {
   CHECK(cut <= 40 && cut == 1u + rec[0]);  // only the first entry (28 bytes) fits
 }
 
+static void test_hid_report(void) {
+  CHECK(hid_ascii_usage('a') == 0x04 && hid_ascii_usage('z') == 0x1D);
+  CHECK(hid_ascii_usage('A') == (0x04 | 0x80));
+  CHECK(hid_ascii_usage('1') == 0x1E && hid_ascii_usage('0') == 0x27 && hid_ascii_usage('!') == (0x1E | 0x80));
+  CHECK(hid_ascii_usage('@') == (0x1F | 0x80) && hid_ascii_usage(')') == (0x27 | 0x80));
+  CHECK(hid_ascii_usage('-') == 0x2D && hid_ascii_usage('_') == (0x2D | 0x80));
+  CHECK(hid_ascii_usage('/') == 0x38 && hid_ascii_usage('?') == (0x38 | 0x80));
+  CHECK(hid_ascii_usage('\n') == 0x28 && hid_ascii_usage(' ') == 0x2C);
+  CHECK(hid_ascii_usage(0) == 0 && hid_ascii_usage(0x01) == 0 && hid_ascii_usage((char)0xC3) == 0);
+  // Every printable ASCII character has a key.
+  for (int c = 0x20; c < 0x7F; c++) CHECK(hid_ascii_usage((char)c) != 0);
+
+  hid_keyboard k;
+  hid_keyboard_clear(&k);
+  CHECK(hid_keyboard_press(&k, 0x83) && k.report[0] == 0x08);  // KEY_LEFT_GUI
+  CHECK(hid_keyboard_press(&k, 'h') && k.report[2] == 0x0B);   // cmd+h
+  CHECK(hid_keyboard_press(&k, 'h') && k.report[3] == 0);      // held already: no second slot
+  hid_keyboard_clear(&k);
+  CHECK(hid_keyboard_press(&k, 'H') && k.report[0] == 0x02 && k.report[2] == 0x0B);
+  hid_keyboard_clear(&k);
+  CHECK(hid_keyboard_press(&k, 0xB0) && k.report[2] == 0x28);  // KEY_RETURN
+  hid_keyboard_clear(&k);
+  CHECK(hid_keyboard_press(&k, 0xDA) && k.report[2] == 0x52);  // KEY_UP_ARROW
+  hid_keyboard_clear(&k);
+  CHECK(!hid_keyboard_press(&k, 0x01) && k.report[2] == 0);
+  const char six[] = "abcdef";
+  for (int i = 0; i < 6; i++) CHECK(hid_keyboard_press(&k, (uint8_t)six[i]));
+  CHECK(!hid_keyboard_press(&k, 'g'));
+
+  uint8_t m[HID_MOUSE_LEN];
+  hid_mouse_report(m, 1, 10, -10, 500, -500);
+  CHECK(m[0] == 1 && (int8_t)m[1] == 10 && (int8_t)m[2] == -10 && (int8_t)m[3] == 127 && (int8_t)m[4] == -127);
+  uint8_t c[HID_CONSUMER_LEN];
+  hid_consumer_report(c, 0x0223);
+  CHECK(c[0] == 0x23 && c[1] == 0x02);
+
+  // The map parses: item sizes stay in bounds, collections balance, and each report's bits match its length.
+  int depth = 0, size = 0, count = 0, id = 0, in[4] = {0};
+  for (size_t i = 0; i < hid_report_map_len;) {
+    uint8_t item = hid_report_map[i];
+    int n = item & 3;
+    n = n == 3 ? 4 : n;
+    CHECK(i + 1 + n <= hid_report_map_len);
+    int v = n >= 1 ? hid_report_map[i + 1] : 0;
+    if (item == 0xA1) depth++;
+    if (item == 0xC0) depth--;
+    if (item == 0x75) size = v;
+    if (item == 0x95) count = v;
+    if (item == 0x85) id = v;
+    if ((item & 0xFC) == 0x80 && id >= 1 && id <= 3) in[id] += size * count;
+    i += 1 + n;
+  }
+  CHECK(depth == 0);
+  CHECK(in[HID_REPORT_KEYBOARD] == HID_KEYBOARD_LEN * 8);
+  CHECK(in[HID_REPORT_CONSUMER] == HID_CONSUMER_LEN * 8);
+  CHECK(in[HID_REPORT_MOUSE] == HID_MOUSE_LEN * 8);
+}
+
 int main(void) {
   test_mdns();
   test_logring();
@@ -405,6 +464,7 @@ int main(void) {
   test_keystream_resync();
   test_cli_proto();
   test_arbiter();
+  test_hid_report();
   printf(fails ? "%d FAILED\n" : "all tests passed\n", fails);
   return fails != 0;
 }

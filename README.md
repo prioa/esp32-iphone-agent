@@ -87,8 +87,9 @@ iPhone ──Screen Mirroring (Wi-Fi)──▶ ESP32-S3: AirPlay receiver ──
   list as *ESP32 Agent*. It keeps the H.264 stream (no decoding on the board) and forwards it to the app over Wi-Fi
   (TCP, port 7201). BLE carries commands and status. The phone keeps using cellular data for the model while it is
   on the board's hotspot.
-- **Hands — USB HID.** The board is a standard USB mouse and keyboard. With AssistiveTouch on, the mouse moves an
-  on-screen pointer, so a click is a tap and a drag is a swipe.
+- **Hands — USB or Bluetooth HID.** The board is a standard mouse and keyboard: over USB when it is plugged into a
+  host, otherwise over Bluetooth to the paired phone. With AssistiveTouch on, the mouse moves an on-screen pointer, so
+  a click is a tap and a drag is a swipe.
 - **Brain — the app.** The app decodes the stream, sends screenshots to any OpenAI-compatible vision model, and runs
   a planner and an actor: tap, swipe, draw, type, press keys, go home, finish. It runs in the background while it
   works; the Dynamic Island shows what it is doing.
@@ -108,11 +109,29 @@ Supported boards and setup details: [hardware guide](https://handsy.tech/docs/ha
 |---|---|
 | **ESP32-S3 board** | Tested with a [Seeed Studio XIAO ESP32S3](https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/) (plain version, 8 MB PSRAM; not Sense, not Plus). About $7 ([Amazon](https://amzn.to/3U6QKiz)\*). Any ESP32-S3 with native USB on its USB-C port and PSRAM should work. |
 | **USB-C cable** | Short USB-C to USB-C, e.g. [Anker 60W, 1 ft, 2-pack](https://amzn.to/4yvNyvi)\*. |
-| **iPhone** | iOS 18 or later, with cellular data (the Wi-Fi is taken by the board's hotspot). USB-C models plug in directly; Lightning models need a Lightning to USB Camera Adapter. The phone powers the board. |
+| **iPhone** | iOS 18 or later, with cellular data (the Wi-Fi is taken by the board's hotspot). USB-C models plug in directly; Lightning models need a Lightning to USB Camera Adapter. The phone powers the board. Over Bluetooth instead: see [Bluetooth instead of USB](#bluetooth-instead-of-usb). |
 | **Vision model** | Any OpenAI-compatible chat API that accepts images: a cloud API or your own server. |
 | **Mac with Xcode** | Only to flash the board and build the app once. Not needed at run time. With the [TestFlight](https://testflight.apple.com/join/1xQHgJcA) app, Xcode is not needed for the app. |
 
 \* Affiliate link. As an Amazon Associate I earn from qualifying purchases.
+
+### Bluetooth instead of USB
+
+This fork's addition. Based on [ESP32 iPhone Agent](https://github.com/onehumanbeing/esp32-iphone-agent) by Henry Yuan.
+
+Experimental. Without a USB host the board drives the phone as a Bluetooth mouse and keyboard, so a USB charger or
+power bank is enough. Plugged into a host, it uses USB as before; `hid` in the board's status says which route is in
+use (`usb`, `ble` or `off`).
+
+1. Power the board, then within 3 minutes pair **ESP32 Agent XXXX** in **Settings → Bluetooth**. Power-cycle the board
+   if that window has passed.
+2. Turn on AssistiveTouch, as for USB.
+3. Set the layout to U.S. in **Settings → General → Keyboard → Hardware Keyboard**: the board sends U.S. key codes, so a
+   German layout swaps `y` and `z` and changes symbols.
+
+Limits: unlike USB, the board cannot tell over Bluetooth that the phone is locked or wake it. A Mac paired for
+debugging can subscribe to the same reports, so its pointer may move too. The app's firmware updates install
+upstream's builds without this feature once they reach a higher version.
 
 ## Quick start
 

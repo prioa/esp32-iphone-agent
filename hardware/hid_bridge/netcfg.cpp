@@ -8,11 +8,11 @@
 #include <esp_coexist.h>
 #include <esp_wifi.h>
 #include "wifi_video.h"
+#include "logbuf.h"
 
 #if STA_FROM_SECRETS
 #if __has_include("secrets.h")
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS (git-ignored)
-#include "logbuf.h"
 #define BOOT_STA 1
 #else
 #warning "STA_FROM_SECRETS set but secrets.h is missing: booting as SoftAP"

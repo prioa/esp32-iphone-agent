@@ -63,6 +63,8 @@ After a task succeeded, save it so the next run is faster:
 - `video frozen`: ask the user to stop and restart Screen Mirroring.
 - `not paired`: ask the user to replug the board and run `esp32agent pair` within 3 minutes.
 - `phone usb asleep`: the phone is locked; ask the user to unlock it.
+- `phone bluetooth not connected`: the board has no USB host and no paired phone; ask the user to check Settings → Bluetooth.
+- `bluetooth report not sent`: the Bluetooth link stalled; retry, and check the pointer position before relying on it.
 - `not supported on ESP32 Agent`: there is no app list, UI tree, file access or webview; work from screenshots.
 
 ## Limits

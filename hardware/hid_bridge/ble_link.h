@@ -8,6 +8,9 @@ void ble_begin(const String &name);
 bool ble_connected();
 bool ble_app_connected();  // an encrypted (bonded) link: the app, not the CLI
 bool ble_app_active();     // that link, and the app sent a real command lately: it holds the board
+// That link, and the app wrote anything lately. iOS keeps a bonded mouse's link up without the app, so a link alone
+// doesn't say the app is there.
+bool ble_app_alive();
 // Where a command came from, and where its reply goes.
 const char FROM_APP = 'a', FROM_CLI = 'c';
 
@@ -19,6 +22,11 @@ void ble_cli_status(const String &full, const String &compact);  // to the CLI, 
 size_t ble_video_room();                           // payload bytes per video notify; 0 = nobody listening
 bool ble_video_send(const uint8_t *p, size_t n);   // waits for free buffers; false = gave up
 void ble_unpair();
+
+// The phone's Bluetooth mouse + keyboard (HID over GATT, src/hid/hid_report.h). Only bonded, encrypted peers get reports.
+enum BleHidReport { BLE_HID_KEYBOARD, BLE_HID_CONSUMER, BLE_HID_MOUSE };
+bool ble_hid_ready();                                         // an encrypted peer subscribed to the mouse report
+bool ble_hid_send(BleHidReport r, const uint8_t *p, size_t n);  // false: nobody got it
 
 uint16_t ble_mtu();
 uint8_t ble_phy();       // 1 or 2 (Mbit)
