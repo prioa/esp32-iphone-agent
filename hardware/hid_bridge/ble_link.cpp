@@ -12,7 +12,6 @@
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <NimBLEDevice.h>
-#include <NimBLEHIDDevice.h>
 #include "nimble/nimble/host/include/host/ble_hs.h"
 #include "netcfg.h"
 #include "cli_link.h"
@@ -59,7 +58,7 @@ struct Text {
 };
 
 static NimBLEServer *server;
-static NimBLECharacteristic *chars[CH_COUNT], *netChar, *cliIn;
+static NimBLECharacteristic *chars[CH_COUNT], *netChar, *cliIn, *reportMap;
 static QueueHandle_t cmdQueue, replyQueue;
 static SemaphoreHandle_t statusLock;
 static Text statusText, cliStatus;
@@ -105,10 +104,14 @@ static bool isKnown(const NimBLEAddress &a) {
   return false;
 }
 
-// Commands and notifications need an encrypted (bonded) link: a stranger's plain link gets nothing.
+// A link to the CLI's identity (our random address). macOS sees the HID service there too and pairs on its own; such a
+// link is still never the app's: no commands, app notifications or HID reports, and no bond kept (onAuthenticationComplete).
+static bool onCliIdentity(const ble_gap_conn_desc &d) { return d.our_ota_addr.type != BLE_ADDR_PUBLIC; }
+
+// Commands and notifications need an encrypted (bonded) link to the app's identity: a stranger's plain link gets nothing.
 static bool encrypted(int h) {
   ble_gap_conn_desc d;
-  return h >= 0 && ble_gap_conn_find(h, &d) == 0 && d.sec_state.encrypted;
+  return h >= 0 && ble_gap_conn_find(h, &d) == 0 && d.sec_state.encrypted && !onCliIdentity(d);
 }
 
 static int slotOf(int h) {
@@ -167,6 +170,8 @@ class ServerCb : public NimBLEServerCallbacks {
     if (i < 0) { s->disconnect(ci.getConnHandle()); return; }
     connAt[i] = millis();
     logConn("connect", ci);
+    ble_gap_conn_desc d;  // the app's identity is a bonded mouse: ask for security, as reading `net` would
+    if (ble_gap_conn_find(ci.getConnHandle(), &d) == 0 && !onCliIdentity(d)) NimBLEDevice::startSecurity(ci.getConnHandle());
     tuneLink(ci.getConnHandle());
     advertise();  // advertising stopped with this link; go on as the other side, while there is room
   }
@@ -189,6 +194,12 @@ class ServerCb : public NimBLEServerCallbacks {
     logConn("security", ci);
     if (!ci.isEncrypted()) return;
     NimBLEAddress a = ci.getIdAddress();
+    ble_gap_conn_desc d;
+    if (ble_gap_conn_find(ci.getConnHandle(), &d) == 0 && onCliIdentity(d)) {
+      BLE_LOG("conn %u: paired on the CLI identity (a computer's HID stack), bond dropped\n", ci.getConnHandle());
+      if (!isKnown(a)) NimBLEDevice::deleteBond(a);
+      return;
+    }
     if (isKnown(a)) return;
     if (millis() - pairOpened < PAIR_WINDOW_MS && knownCount < 8) { known[knownCount++] = a; return; }
     BLE_LOG("conn %u: new phone outside the pairing window, refused\n", ci.getConnHandle());
@@ -202,7 +213,7 @@ class CharCb : public NimBLECharacteristicCallbacks {
     const NimBLEAttValue &raw = c->getValue();
     if (c == cliIn) { cli_on_frame(slotFor(ci.getConnHandle()), raw.data(), raw.length()); return; }
     String v(raw.c_str(), raw.length());
-    if (!ci.isEncrypted()) return;
+    if (!encrypted(ci.getConnHandle())) return;
     if (c == netChar) { net_request(v); return; }
     v.trim();
     appWroteMs = millis() | 1;
@@ -210,6 +221,13 @@ class CharCb : public NimBLECharacteristicCallbacks {
     ble_push_cmd(FROM_APP, v.c_str(), v.length());
   }
   void onRead(NimBLECharacteristic *c, NimBLEConnInfo &ci) override {
+    if (c == reportMap) {  // only the app's identity is a mouse + keyboard; an empty map keeps a computer's HID stack off
+      ble_gap_conn_desc d;
+      bool cli = ble_gap_conn_find(ci.getConnHandle(), &d) == 0 && onCliIdentity(d);
+      if (cli) c->setValue((const uint8_t *)"", 0);
+      else c->setValue(hid_report_map, hid_report_map_len);
+      return;
+    }
     if (c != netChar) return;
     String j = net_json();
     c->setValue((const uint8_t *)j.c_str(), j.length());
@@ -381,7 +399,7 @@ static void setUpAdvertising(const std::string &name) {
   // The app finds the board by its own service, iOS Settings lists it as a mouse + keyboard by the HID one.
   appAdv.addServiceUUID(NimBLEUUID(UUID("0000")));
   appAdv.addServiceUUID(NimBLEUUID((uint16_t)0x1812));
-  appAdv.setAppearance(HID_KEYBOARD);
+  appAdv.setAppearance(0x03C1);  // HID keyboard
   cliAdv.setCompleteServices(NimBLEUUID(UUID("0010")));
   NimBLEAdvertisementData scan;
   scan.setName(name);
@@ -390,6 +408,42 @@ static void setUpAdvertising(const std::string &name) {
   esp_fill_random(a, sizeof a);
   a[5] |= 0xC0;  // random static: top two bits set (NimBLE addresses are little-endian)
   if (!NimBLEDevice::setOwnAddr(a)) board_log("ble: no random address for the CLI");
+}
+
+// HID over GATT (mouse + keyboard + consumer keys, src/hid/hid_report.h), built by hand rather than with NimBLEHIDDevice:
+// its reports require encryption to read, and a computer's HID stack meeting that on the CLI's link tries to pair and
+// stalls the CLI's writes. Here nothing is encrypted to read; reports only ever go to encrypted links to the app's
+// identity (notifyOne), which asks for security itself (onConnect).
+static NimBLECharacteristic *hidReport(NimBLEService *svc, uint8_t id, uint8_t type, uint32_t props) {
+  NimBLECharacteristic *c = svc->createCharacteristic((uint16_t)0x2A4D, props);
+  uint8_t ref[2] = {id, type};  // Report Reference: report id, 1 input / 2 output
+  c->createDescriptor((uint16_t)0x2908, NIMBLE_PROPERTY::READ, 2)->setValue(ref, 2);
+  return c;
+}
+
+static void setUpHid() {
+  NimBLEService *info = server->createService((uint16_t)0x180A);
+  info->createCharacteristic((uint16_t)0x2A29, NIMBLE_PROPERTY::READ)->setValue("ESP32 Agent");
+  const uint8_t pnp[7] = {0x02, 0x3A, 0x30, 0x01, 0x40, 0x00, 0x01};  // USB vendor id 0x303A (Espressif), pid 0x4001, v1.0
+  info->createCharacteristic((uint16_t)0x2A50, NIMBLE_PROPERTY::READ)->setValue(pnp, sizeof pnp);
+
+  NimBLEService *hid = server->createService((uint16_t)0x1812);
+  const uint8_t hidInfo[4] = {0x11, 0x01, 0x00, 0x01};  // HID 1.11, no country, remote wake
+  hid->createCharacteristic((uint16_t)0x2A4A, NIMBLE_PROPERTY::READ)->setValue(hidInfo, sizeof hidInfo);
+  reportMap = hid->createCharacteristic((uint16_t)0x2A4B, NIMBLE_PROPERTY::READ, hid_report_map_len);
+  reportMap->setValue(hid_report_map, hid_report_map_len);
+  hid->createCharacteristic((uint16_t)0x2A4C, NIMBLE_PROPERTY::WRITE_NR);  // control point: suspend / exit suspend
+  const uint8_t reportMode = 1;
+  hid->createCharacteristic((uint16_t)0x2A4E, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE_NR)->setValue(&reportMode, 1);
+  uint32_t in = NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY;
+  chars[CH_HID_KEYBOARD] = hidReport(hid, HID_REPORT_KEYBOARD, 1, in);
+  chars[CH_HID_CONSUMER] = hidReport(hid, HID_REPORT_CONSUMER, 1, in);
+  chars[CH_HID_MOUSE] = hidReport(hid, HID_REPORT_MOUSE, 1, in);
+  hidReport(hid, HID_REPORT_KEYBOARD, 2, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);  // LEDs
+
+  NimBLEService *battery = server->createService((uint16_t)0x180F);
+  const uint8_t level = 100;
+  battery->createCharacteristic((uint16_t)0x2A19, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY)->setValue(&level, 1);
 }
 
 // Queue storage in PSRAM (the two below hold ~7 KB); only the control block stays in internal RAM.
@@ -434,16 +488,8 @@ void ble_begin(const String &name) {
   NimBLEService *cliSvc = server->createService(UUID("0010"));
   cliIn = cliSvc->createCharacteristic(UUID("0011"), NIMBLE_PROPERTY::WRITE, CMD_MAX + 64);
   chars[CH_CLI] = cliSvc->createCharacteristic(UUID("0012"), NIMBLE_PROPERTY::NOTIFY);
-  NimBLEHIDDevice *hid = new NimBLEHIDDevice(server);
-  hid->setManufacturer("ESP32 Agent");
-  hid->setPnp(0x02, 0x303A, 0x4001, 0x0100);  // USB vendor id: Espressif
-  hid->setHidInfo(0x00, 0x01);
-  hid->setReportMap((uint8_t *)hid_report_map, hid_report_map_len);
-  hid->setBatteryLevel(100);
-  chars[CH_HID_KEYBOARD] = hid->getInputReport(HID_REPORT_KEYBOARD);
-  chars[CH_HID_CONSUMER] = hid->getInputReport(HID_REPORT_CONSUMER);
-  chars[CH_HID_MOUSE] = hid->getInputReport(HID_REPORT_MOUSE);
-  hid->getOutputReport(HID_REPORT_KEYBOARD);  // the LEDs: iOS may write them, nothing reads them
+  setUpHid();
+  reportMap->setCallbacks(&charCb);
   cliIn->setCallbacks(&charCb);
   cmd->setCallbacks(&charCb);
   netChar->setCallbacks(&charCb);
