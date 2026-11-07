@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iPhone-Steuerung</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f6f5f2;--fg:#1d1d1b;--mut:#6b6a66;--card:#fff;--line:#e3e1db;--acc:#1b6ef3;--accbg:#e8f0fe;--ok:#1a7f4b;--warn:#b45309;--bad:#b42318;--unk:#8a8880;--code:#f0efeb}
+@media(prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe7;--mut:#9a9890;--card:#1f1f1d;--line:#32312e;--acc:#6aa3ff;--accbg:#1c2a44;--ok:#4cc38a;--warn:#e0a458;--bad:#ff7b72;--unk:#7c7a73;--code:#2a2926}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif}
+button,input,textarea{font:inherit;color:inherit}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px}
+header h1{font-size:15px;font-weight:650;margin:0}
+#summary{font-weight:600}
+#summary.ok{color:var(--ok)}#summary.warn{color:var(--warn)}#summary.bad{color:var(--bad)}
+#meta{color:var(--mut);margin-left:auto;font-size:13px}
+main{display:grid;grid-template-columns:minmax(240px,340px) minmax(300px,1fr) minmax(300px,1.1fr);gap:16px;padding:16px;align-items:start}
+@media(max-width:1100px){main{grid-template-columns:minmax(220px,300px) 1fr}.right{grid-column:1/-1}}
+@media(max-width:700px){main{grid-template-columns:1fr;padding:16px}}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:16px}
+section:last-child{margin-bottom:0}
+h2{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);margin:0 0 8px;font-weight:650}
+h3{font-size:13px;color:var(--mut);margin:12px 0 4px;font-weight:600}
+h3:first-of-type{margin-top:0}
+.hint{color:var(--mut);font-size:13px;margin:6px 0 0}
+button{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:5px 10px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--acc)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button.danger{color:var(--bad)}
+button.stop{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+input[type=text],textarea{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:6px 8px}
+textarea{min-height:64px;resize:vertical}
+:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.row+.row{margin-top:8px}
+.grow{flex:1;min-width:120px}
+label.check{display:flex;gap:6px;align-items:center;margin-top:8px}
+#screenbox{position:relative;line-height:0;user-select:none;touch-action:none;background:var(--code);border-radius:8px;overflow:hidden;min-height:200px}
+#screen{width:100%;display:block;cursor:crosshair}
+#screen[hidden]{display:none}
+#noframe{line-height:1.45;padding:60px 16px;text-align:center;color:var(--mut)}
+#marker{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;border:2px solid #ff3b30;border-radius:50%;box-shadow:0 0 0 2px #fff;pointer-events:none;display:none}
+#stale{color:var(--mut);font-size:13px;margin-top:6px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.link{display:grid;grid-template-columns:12px 1fr;gap:2px 8px;padding:5px 0;align-items:baseline}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--unk);align-self:center}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+.link b{font-weight:600}
+.link span{grid-column:2;color:var(--mut);font-size:13px;overflow-wrap:anywhere}
+.step{display:grid;grid-template-columns:22px 1fr auto;gap:2px 8px;padding:6px 8px;border-radius:7px;align-items:center}
+.step.next{background:var(--accbg)}
+.step .mark{font-weight:700;text-align:center}
+.step .mark.done{color:var(--ok)}.step .mark.todo{color:var(--mut)}
+.step p{grid-column:2/-1;margin:0;color:var(--mut);font-size:13px}
+.banner{padding:8px 10px;border-radius:7px;margin-bottom:10px;background:var(--code);border-left:3px solid var(--warn)}
+.banner.bad{border-left-color:var(--bad)}
+#agentpending{border:1px solid var(--acc);background:var(--accbg);border-radius:8px;padding:10px;margin-top:10px}
+#agentpending p{margin:0 0 8px;white-space:pre-wrap;overflow-wrap:anywhere;font-weight:600}
+#agentresult{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:10px}
+#log{list-style:none;margin:0;padding:0;max-height:560px;overflow:auto}
+#log li{border-top:1px solid var(--line);padding:6px 2px}
+#log li:first-child{border-top:0}
+.lh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.lt{color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}
+.ls{font-size:11px;padding:0 6px;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.ls.ok{color:var(--ok);border-color:var(--ok)}.ls.Fehler{color:var(--bad);border-color:var(--bad)}.ls.läuft,.ls.wartet{color:var(--acc);border-color:var(--acc)}
+.ltext{overflow-wrap:anywhere;white-space:pre-wrap}
+.lsrc{color:var(--mut);font-size:12px}
+.ldet{font:12px ui-monospace,Menlo,monospace;color:var(--mut);overflow-wrap:anywhere;margin-top:2px}
+.lerr{color:var(--bad);font-size:13px;overflow-wrap:anywhere}
+#toast{color:var(--bad);font-size:13px;margin-top:8px;min-height:0;overflow-wrap:anywhere}
+dialog{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:10px;max-width:420px}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+details summary{cursor:pointer;color:var(--mut);font-size:13px}
+#raw{font:12px ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--mut);margin:6px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>iPhone-Steuerung</h1>
+  <span id="summary" role="status">Lade …</span>
+  <span id="meta"></span>
+</header>
+<main>
+  <div class="left">
+    <section>
+      <h2>Live-Bild</h2>
+      <div id="screenbox">
+        <img id="screen" alt="Bildschirm des iPhones" hidden draggable="false">
+        <div id="noframe">Noch kein Bild</div>
+        <div id="marker"></div>
+      </div>
+      <div id="stale"><span id="frameage"></span><span id="coords"></span></div>
+      <p class="hint">Klick tippt, Ziehen wischt langsam. Ein Tipp zeigt sich erst nach 1,5 bis 3 s im Bild.</p>
+      <div class="row" style="margin-top:8px">
+        <button id="scrolldown" title="Seite nach unten scrollen">↓ Scrollen</button>
+        <button id="scrollup" title="Seite nach oben scrollen">↑ Scrollen</button>
+        <button id="home">Home</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="mid">
+    <section>
+      <h2>KI-Auftrag</h2>
+      <div id="agentmissing" class="banner" hidden></div>
+      <textarea id="goal" placeholder="z. B. Öffne die Einstellungen und nenne mir die iOS-Version" aria-label="Auftrag"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button class="primary" id="agentstart">Auftrag starten</button>
+        <button class="stop" id="agentstop" hidden>Stopp</button>
+        <select id="agentmodel" aria-label="Modell">
+          <option value="opus">Opus (gründlich)</option>
+          <option value="sonnet">Sonnet (schnell)</option>
+          <option value="haiku">Haiku (am schnellsten)</option>
+        </select>
+        <span id="agentstate" class="grow"></span>
+      </div>
+      <label class="check"><input type="checkbox" id="stepconfirm"> Jeden Schritt bestätigen</label>
+      <p class="hint">Läuft über dein Claude-Code-Konto und zählt auf dessen Limits. Screenshots des iPhones gehen an Anthropic. Vor Senden, Kaufen, Löschen und Konto-Änderungen soll die KI fragen. Das ist eine Regel für das Modell, keine technische Sperre: Nur „Jeden Schritt bestätigen“ hält jede Aktion wirklich an.</p>
+      <div id="agentpending" hidden>
+        <p id="pendingtext"></p>
+        <div class="row" id="pendingyesno"><button class="primary" id="pendingyes">Ja, ausführen</button><button id="pendingno">Nein</button></div>
+        <div class="row" id="pendinganswer"><input type="text" class="grow" id="pendinginput" aria-label="Antwort"><button class="primary" id="pendingsend">Antworten</button></div>
+      </div>
+      <div id="agentresult" hidden></div>
+    </section>
+
+    <section>
+      <h2>Direkte Befehle</h2>
+      <div id="blocked" class="banner bad" hidden></div>
+      <div class="row">
+        <input type="text" class="grow" id="text" placeholder="Text tippen (nur ASCII, keine Umlaute)" aria-label="Text tippen" maxlength="512">
+        <button id="sendtext">Tippen</button>
+      </div>
+      <p class="hint">Das iPhone braucht die U.S.-Hardware-Tastatur. Autokorrektur kann Wörter ändern.</p>
+      <div class="row">
+        <button data-key="enter" title="Sendet in Signal und vielen Chat-Apps sofort">Enter</button>
+        <button data-key="backspace">Rücktaste</button>
+        <button data-key="esc">Esc</button>
+        <button data-key="tab">Tab</button>
+        <button data-key="cmd+a">⌘A</button>
+        <button data-key="cmd+v">⌘V</button>
+      </div>
+      <div class="row">
+        <input type="text" class="grow" id="rawline" placeholder="Board-Befehl, z. B. status, vdbg, logs, crash" aria-label="Board-Befehl">
+        <button id="sendraw">Senden</button>
+      </div>
+      <label class="check" id="forcelabel" hidden><input type="checkbox" id="force"> Trotz Warnung senden</label>
+      <div id="toast" role="alert"></div>
+    </section>
+
+    <section>
+      <div class="row"><h2 class="grow">Verlauf</h2><button id="logclear">Verlauf leeren</button></div>
+      <ul id="log"></ul>
+    </section>
+  </div>
+
+  <div class="right">
+    <section>
+      <h2>Verbindung</h2>
+      <h3>Steuerung: Mac → iPhone</h3>
+      <div id="chain-control"></div>
+      <h3>Bild: iPhone → Mac</h3>
+      <div id="chain-video"></div>
+      <details style="margin-top:8px"><summary>Rohdaten des Boards</summary><pre id="raw"></pre></details>
+    </section>
+    <section>
+      <h2>Ablauf der Sitzung</h2>
+      <div id="steps"></div>
+      <div class="row" style="margin-top:8px"><button id="recstop" class="danger">Aufnahme stoppen</button></div>
+    </section>
+  </div>
+</main>
+
+<dialog id="dlg">
+  <p id="dlgtext"></p>
+  <div class="row"><button id="dlgyes" class="danger">Ja</button><button id="dlgno">Abbrechen</button></div>
+</dialog>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+let S = null, lastTap = {x: 360, y: 700}, logSig = "";
+
+async function post(path, body) {
+  $("toast").textContent = "";
+  try {
+    const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { $("toast").textContent = d.error || "Der Server hat abgelehnt"; return false; }
+    tick();
+    return true;
+  } catch (_) { $("toast").textContent = "Server nicht erreichbar"; return false; }
+}
+const command = (kind, args = {}) => post("/api/command", {kind, args, force: $("force").checked});
+
+function ask(text) {
+  return new Promise(res => {
+    const d = $("dlg");
+    $("dlgtext").textContent = text;
+    const done = v => { d.close(); $("dlgyes").onclick = $("dlgno").onclick = null; res(v); };
+    $("dlgyes").onclick = () => done(true);
+    $("dlgno").onclick = () => done(false);
+    d.showModal();
+  });
+}
+
+// live picture
+const img = $("screen"), box = $("screenbox");
+function toFrame(ev) {
+  const r = img.getBoundingClientRect(), k = img.naturalWidth / r.width;
+  return {x: Math.round((ev.clientX - r.left) * k), y: Math.round((ev.clientY - r.top) * k)};
+}
+function mark(p) {
+  const r = img.getBoundingClientRect(), k = r.width / img.naturalWidth, m = $("marker");
+  m.style.left = p.x * k + "px"; m.style.top = p.y * k + "px"; m.style.display = "block";
+  clearTimeout(mark.t); mark.t = setTimeout(() => m.style.display = "none", 4000);
+}
+let down = null;
+img.addEventListener("pointerdown", ev => { down = toFrame(ev); img.setPointerCapture(ev.pointerId); });
+img.addEventListener("pointermove", ev => { if (img.naturalWidth) { const p = toFrame(ev); $("coords").textContent = `x ${p.x}, y ${p.y}`; } });
+img.addEventListener("pointerup", ev => {
+  if (!down) return;
+  const a = down, b = toFrame(ev); down = null;
+  if (Math.hypot(b.x - a.x, b.y - a.y) < 12) { lastTap = a; mark(a); command("tap", a); }
+  else { mark(b); command("drag", {x1: a.x, y1: a.y, x2: b.x, y2: b.y}); }
+});
+img.addEventListener("pointercancel", () => down = null);
+// The server answers when a newer frame exists, so a frame shows as it arrives and a slow one never queues up.
+async function frameLoop() {
+  let stamp = "", shown = null;
+  for (;;) {
+    try {
+      const r = await fetch("/live.png?after=" + stamp);
+      if (r.status === 200) {
+        const blob = await r.blob(), url = URL.createObjectURL(blob);
+        stamp = r.headers.get("X-Frame-Stamp");
+        const next = new Image();  // decoded apart, so the shown frame never goes blank and a click always has its size
+        next.src = url;
+        await next.decode();
+        img.src = url;
+        img.hidden = false; $("noframe").hidden = true;
+        if (shown) URL.revokeObjectURL(shown);
+        shown = url;
+      } else if (r.status !== 204) {
+        await new Promise(ok => setTimeout(ok, 1000));
+      }
+    } catch (e) {  // server restarting, or a frame that did not decode
+      await new Promise(ok => setTimeout(ok, 1000));
+    }
+  }
+}
+
+// controls
+$("scrolldown").onclick = () => command("flick", {x: lastTap.x, y: lastTap.y, dy: -120, n: 1});
+$("scrollup").onclick = () => command("flick", {x: lastTap.x, y: lastTap.y, dy: 120, n: 1});
+$("home").onclick = () => command("homescreen");
+$("sendtext").onclick = async () => { if (await command("type", {text: $("text").value})) $("text").value = ""; };
+$("text").addEventListener("keydown", ev => { if (ev.key === "Enter") $("sendtext").click(); });
+document.querySelectorAll("[data-key]").forEach(b => b.onclick = () => command("key", {combo: b.dataset.key}));
+$("sendraw").onclick = async () => {
+  const line = $("rawline").value.trim(), args = {line};
+  if (/^unpair\b/i.test(line)) {
+    if (!await ask("Das Board löscht die Bluetooth-Kopplung. Das iPhone muss danach neu gekoppelt werden. Fortfahren?")) return;
+    args.confirm = true;
+  }
+  if (await command("raw", args)) $("rawline").value = "";
+};
+$("rawline").addEventListener("keydown", ev => { if (ev.key === "Enter") $("sendraw").click(); });
+$("recstop").onclick = async () => {
+  if (await ask("Aufnahme stoppen? Für ein neues Bild muss danach die Bildschirmsynchronisierung neu gestartet werden.")) post("/api/rec", {action: "stop", confirm: true});
+};
+try { $("agentmodel").value = localStorage.getItem("agentmodel") || "opus"; } catch (_) {}
+$("agentmodel").onchange = () => { try { localStorage.setItem("agentmodel", $("agentmodel").value); } catch (_) {} };
+$("agentstart").onclick = async () => {
+  if (await post("/api/agent", {action: "start", goal: $("goal").value, step_confirm: $("stepconfirm").checked, model: $("agentmodel").value})) $("goal").value = "";
+};
+$("agentstop").onclick = () => post("/api/agent", {action: "stop"});
+$("logclear").onclick = async () => {
+  if (await ask("Der gesamte Verlauf wird gelöscht. Fortfahren?")) post("/api/log", {action: "clear", confirm: true});
+};
+const answer = v => post("/api/agent", {action: "answer", id: S.agent.pending.id, value: v});
+$("pendingyes").onclick = () => answer("ja");
+$("pendingno").onclick = () => answer("nein");
+$("pendingsend").onclick = async () => { if (await answer($("pendinginput").value)) $("pendinginput").value = ""; };
+$("pendinginput").addEventListener("keydown", ev => { if (ev.key === "Enter") $("pendingsend").click(); });
+
+// render
+function renderChain(id, links) {
+  $(id).replaceChildren(...links.map(l => {
+    const d = el("div", "link");
+    const dot = el("i", "dot " + l.level);
+    dot.title = {ok: "in Ordnung", warn: "Warnung", bad: "Fehler", unknown: "unbekannt"}[l.level];
+    d.append(dot, el("b", "", l.label), el("span", "", l.detail));
+    return d;
+  }));
+}
+function renderSteps(s) {
+  $("steps").replaceChildren(...s.steps.map(st => {
+    const isNext = s.next === st.key, d = el("div", "step" + (isNext ? " next" : ""));
+    const m = st.done === true ? ["✓", "done", "erledigt"] : st.done === false ? ["○", "todo", "offen"] : ["?", "todo", "unbekannt"];
+    const mark = el("span", "mark " + m[1], m[0]); mark.title = m[2];
+    d.append(mark, el("span", "", st.title));
+    const slot = el("span");
+    if (st.action === "info" && st.done !== true) {
+      const b = el("button", isNext ? "primary" : "", "Holen"); b.onclick = () => command("info"); slot.append(b);
+    }
+    if (st.action === "rec_start" && st.done !== true) {
+      const b = el("button", isNext ? "primary" : "", "Starten"); b.onclick = () => post("/api/rec", {action: "start"}); slot.append(b);
+    }
+    d.append(slot);
+    if (isNext) d.append(el("p", "", st.hint));
+    return d;
+  }));
+  $("recstop").disabled = !s.steps.some(st => st.key === "rec" && st.done);
+}
+function renderLog(entries) {
+  const sig = entries.map(e => e.id + e.state).join();
+  if (sig === logSig) return;
+  const log = $("log"), keep = log.scrollTop;
+  logSig = sig;
+  log.replaceChildren(...entries.slice().reverse().map(e => {
+    const li = el("li"), h = el("div", "lh");
+    h.append(el("span", "lt", new Date(e.t * 1000).toLocaleTimeString("de-DE")), el("span", "lsrc", e.src));
+    if (e.state !== "info") h.append(el("span", "ls " + e.state, e.state));
+    if (e.dur != null) h.append(el("span", "lt", e.dur.toFixed(1) + " s"));
+    li.append(h, el("div", "ltext", e.text));
+    if (e.lines && e.lines.length) li.append(el("div", "ldet", e.lines.map(l => `${l.line} → ${l.reply ?? "keine Antwort"}`).join("\n")));
+    if (e.err) li.append(el("div", "lerr", e.err));
+    return li;
+  }));
+  log.scrollTop = keep;
+}
+function renderAgent(a) {
+  const on = a.state === "läuft" || a.state === "wartet";
+  $("agentmissing").hidden = a.available;
+  $("agentmissing").textContent = a.missing || "";
+  $("agentstart").disabled = on || !a.available;
+  $("agentstart").hidden = on;
+  $("agentstop").hidden = !on;
+  $("agentmodel").disabled = on;
+  const u = a.usage, tok = u.input + u.cache_read + u.cache_write + u.output;
+  $("agentstate").textContent = a.state === "bereit" ? "" :
+    `${a.state}, Schritt ${a.steps}, ${tok.toLocaleString("de-DE")} Tokens` + (a.model ? `, ${a.model}` : "");
+  const p = a.pending;
+  $("agentpending").hidden = !p;
+  if (p) {
+    const label = {frage: "Frage: ", bestaetigen: "Bestätigen: ", schritt: "Schritt ausführen: "}[p.kind];
+    $("pendingtext").textContent = label + p.text;
+    $("pendingyesno").hidden = p.kind === "frage";
+    $("pendinganswer").hidden = p.kind !== "frage";
+  }
+  $("agentresult").hidden = !a.result || on;
+  $("agentresult").textContent = a.result || "";
+}
+function render(s) {
+  S = s;
+  const all = s.chains.control.concat(s.chains.video);
+  const worst = all.some(l => l.level === "bad") ? "bad" : all.some(l => l.level === "warn" || l.level === "unknown") ? "warn" : "ok";
+  const sum = $("summary");
+  sum.className = worst;
+  sum.textContent = worst === "ok" ? "Alles verbunden" : "Prüfen: " + all.filter(l => l.level !== "ok").map(l => l.label).join(", ");
+  $("meta").textContent = (s.port_busy ? "Port belegt · " : "") + (s.queue ? `${s.queue} in der Warteschlange · ` : "") + (s.status ? `${s.status.ip}` : "");
+  renderChain("chain-control", s.chains.control);
+  renderChain("chain-video", s.chains.video);
+  renderSteps(s.session);
+  renderLog(s.entries);
+  renderAgent(s.agent);
+  $("raw").textContent = s.status ? JSON.stringify(s.status, null, 1) : "Kein Status";
+  const b = s.bot.blocked;
+  $("blocked").hidden = !b; $("blocked").textContent = b || "";
+  $("forcelabel").hidden = !b;
+  if (!b) $("force").checked = false;
+  $("frameage").textContent = s.frame.age == null ? "" : `Bild von vor ${Math.round(s.frame.age)} s`;
+}
+async function tick() {
+  try {
+    const r = await fetch("/api/state");
+    if (!r.ok) throw 0;
+    render(await r.json());
+  } catch (_) {
+    const sum = $("summary"); sum.className = "bad"; sum.textContent = "Server nicht erreichbar";
+  }
+}
+tick();
+frameLoop();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
