@@ -252,7 +252,12 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def host_ok(self):
+        return (self.headers.get("Host") or "").split(":")[0] in ("127.0.0.1", "localhost")
+
     def do_GET(self):
+        if not self.host_ok():
+            return self.send(403, "text/plain", b"no")  # no DNS-rebinding host
         u = urlparse(self.path)
         if u.path == "/":
             return self.send(200, "text/html; charset=utf-8", PAGE.encode())
@@ -291,8 +296,7 @@ class H(BaseHTTPRequestHandler):
         self.send(404, "text/plain", b"not found")
 
     def do_POST(self):
-        host = (self.headers.get("Host") or "").split(":")[0]
-        if urlparse(self.path).path != "/api/control" or host not in ("127.0.0.1", "localhost") \
+        if not self.host_ok() or urlparse(self.path).path != "/api/control" \
                 or "application/json" not in (self.headers.get("Content-Type") or ""):
             return self.send(403, "text/plain", b"no")  # no other page, no rebinding host, only our own JSON
         try:
