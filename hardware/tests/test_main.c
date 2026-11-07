@@ -408,6 +408,21 @@ static void test_hid_report(void) {
   // Every printable ASCII character has a key.
   for (int c = 0x20; c < 0x7F; c++) CHECK(hid_ascii_usage((char)c) != 0);
 
+  // German QWERTZ: y and z swap places, most punctuation moves, umlauts/ß are Latin-1.
+  CHECK(hid_ascii_usage_de('a') == 0x04 && hid_ascii_usage_de('x') == 0x1B);
+  CHECK(hid_ascii_usage_de('y') == 0x1D && hid_ascii_usage_de('z') == 0x1C);
+  CHECK(hid_ascii_usage_de('Y') == (0x1D | 0x80) && hid_ascii_usage_de('Z') == (0x1C | 0x80));
+  CHECK(hid_ascii_usage_de('1') == 0x1E && hid_ascii_usage_de('0') == 0x27);  // digit row unchanged
+  CHECK(hid_ascii_usage_de((char)0xE4) == 0x34 && hid_ascii_usage_de((char)0xC4) == (0x34 | 0x80));  // ä Ä
+  CHECK(hid_ascii_usage_de((char)0xF6) == 0x33 && hid_ascii_usage_de((char)0xD6) == (0x33 | 0x80));  // ö Ö
+  CHECK(hid_ascii_usage_de((char)0xFC) == 0x2F && hid_ascii_usage_de((char)0xDC) == (0x2F | 0x80));  // ü Ü
+  CHECK(hid_ascii_usage_de((char)0xDF) == 0x2D && hid_ascii_usage_de('?') == (0x2D | 0x80));         // ß ?
+  CHECK(hid_ascii_usage_de('-') == 0x38 && hid_ascii_usage_de('_') == (0x38 | 0x80));
+  CHECK(hid_ascii_usage_de('&') == (0x23 | 0x80));  // differs from the US table's 0x24|0x80
+  CHECK(hid_ascii_usage_de('<') == 0x64 && hid_ascii_usage_de('>') == (0x64 | 0x80));
+  CHECK(hid_ascii_usage_de('\n') == 0x28 && hid_ascii_usage_de(' ') == 0x2C);
+  CHECK(hid_ascii_usage_de('@') == 0 && hid_ascii_usage_de('^') == 0 && hid_ascii_usage_de('{') == 0);
+
   hid_keyboard k;
   hid_keyboard_clear(&k);
   CHECK(hid_keyboard_press(&k, 0x83) && k.report[0] == 0x08);  // KEY_LEFT_GUI

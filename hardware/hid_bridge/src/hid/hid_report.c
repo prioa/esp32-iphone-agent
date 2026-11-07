@@ -47,6 +47,54 @@ uint8_t hid_ascii_usage(char c) {
   return u;
 }
 
+uint8_t hid_ascii_usage_de(char c) {
+  // a-x sit at the same physical key as on a US keyboard; only y and z swap places on QWERTZ.
+  if (c >= 'a' && c <= 'x') return (uint8_t)(0x04 + c - 'a');
+  if (c >= 'A' && c <= 'X') return (uint8_t)((0x04 + c - 'A') | 0x80);
+  if (c == 'y') return 0x1D;
+  if (c == 'Y') return (uint8_t)(0x1D | 0x80);
+  if (c == 'z') return 0x1C;
+  if (c == 'Z') return (uint8_t)(0x1C | 0x80);
+  if (c >= '1' && c <= '9') return (uint8_t)(0x1E + c - '1');  // digit row: same keys as US
+  if (c == '0') return 0x27;
+  if (c == '\n') return 0x28;
+  if (c == '\b') return 0x2A;
+  if (c == '\t') return 0x2B;
+  if (c == ' ') return 0x2C;
+  switch ((unsigned char)c) {
+    case 0xDF: return 0x2D;              // ß
+    case '?':  return 0x2D | 0x80;
+    case 0xFC: return 0x2F;              // ü
+    case 0xDC: return 0x2F | 0x80;       // Ü
+    case '+':  return 0x30;
+    case '*':  return 0x30 | 0x80;
+    case '#':  return 0x32;              // the extra "Non-US # and ~" key
+    case '\'': return 0x32 | 0x80;
+    case 0xF6: return 0x33;              // ö
+    case 0xD6: return 0x33 | 0x80;       // Ö
+    case 0xE4: return 0x34;              // ä
+    case 0xC4: return 0x34 | 0x80;       // Ä
+    case ',':  return 0x36;
+    case ';':  return 0x36 | 0x80;
+    case '.':  return 0x37;
+    case ':':  return 0x37 | 0x80;
+    case '-':  return 0x38;
+    case '_':  return 0x38 | 0x80;
+    case '<':  return 0x64;              // the extra "Non-US \ and |" (ISO) key
+    case '>':  return 0x64 | 0x80;
+    case '!':  return 0x1E | 0x80;       // shifted digit row, mostly unlike the US table
+    case '"':  return 0x1F | 0x80;
+    case '$':  return 0x21 | 0x80;
+    case '%':  return 0x22 | 0x80;
+    case '&':  return 0x23 | 0x80;
+    case '/':  return 0x24 | 0x80;
+    case '(':  return 0x25 | 0x80;
+    case ')':  return 0x26 | 0x80;
+    case '=':  return 0x27 | 0x80;
+    default: return 0;  // AltGr-only (@ { } [ ] \ | ~ €) and dead keys (´ ` ^ °): not supported here
+  }
+}
+
 void hid_keyboard_clear(hid_keyboard *k) { memset(k->report, 0, sizeof k->report); }
 
 bool hid_keyboard_press(hid_keyboard *k, uint8_t code) {
