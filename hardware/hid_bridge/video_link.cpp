@@ -14,6 +14,14 @@
 #define GOP_CAP_KB 4096  // flash.sh --small-gop: 256, to test a frozen GOP within minutes
 #endif
 const size_t GOP_CAP = GOP_CAP_KB * 1024;
+// flash.sh --drop-sent, for one viewer that stays connected (tools/drive): once the GOP is half full, the AUs it was
+// sent are dropped, so the whole GOP is room for what it has not got yet. At 40 KB per AU (a busy game screen) the
+// GOP froze after ~30 s and only the tail's ~13 AUs were left as a margin. The price: nobody else can start from
+// this GOP any more, a new viewer needs the next IDR (restart mirroring).
+#ifndef GOP_DROP_SENT
+#define GOP_DROP_SENT 0
+#endif
+const int DROP_KEEP = 8;  // sent AUs kept for a resume
 const int MAX_AUS = 8192;
 const size_t TAIL_CAP = 512 * 1024;     // AUs after a frozen GOP, until the streams have sent them
 const int TAIL_AUS = 1024;
@@ -52,6 +60,8 @@ struct Sink {
 static gop_buf gop, tail;
 static volatile bool tailLive;  // the tail holds every AU since the GOP froze (sent ones may be dropped)
 static bool tailTrimmed;        // its oldest AUs were dropped: a resume must land in the tail itself
+static bool gopTrimmed;         // GOP_DROP_SENT dropped its IDR: only the stream that got it can go on
+static uint32_t droppedSent;    // AUs dropped that way (vdbg)
 static Sink sink = {FROM_APP};
 static SemaphoreHandle_t lock;
 static uint8_t chunk[VCHUNK_HDR + (WV_PAYLOAD > MAX_CHUNK ? WV_PAYLOAD : MAX_CHUNK)];
@@ -63,6 +73,7 @@ static volatile float statFps;
 static int sideOf(char who) { return who == FROM_CLI; }
 
 static void unfollow(Sink &s, char why);
+static void dropSent(Sink &s);
 static uint8_t resumeFlag(Sink &s) {
   bool r = s.resumed;
   s.resumed = false;
@@ -131,10 +142,14 @@ static bool copyTail(Sink &s, uint32_t gen, int i, gop_au *au) {
   return ok;
 }
 
-// The tail is full: drop what the stream on it sent long ago (TAIL_KEEP stay for a resume). False if it is that
-// far behind (or nobody is on it): the tail breaks, frozen until the next IDR. Under lock.
+// The tail is full: drop what the stream on it sent long ago (TAIL_KEEP stay for a resume, fewer when the AUs are
+// big: 64 AUs of a busy game screen at ~9 KB each are more than the whole tail, so it broke off ~12 s after the GOP
+// froze although the stream was in step, 2026-11-05). False if it sent none of them (or nobody is on it): the tail
+// breaks, frozen until the next IDR. Under lock.
 static bool makeTailRoom() {
-  int drop = sink.onTail ? sink.tailNext - TAIL_KEEP : 0;
+  if (!sink.onTail) return false;
+  int keep = min(TAIL_KEEP, sink.tailNext / 2);
+  int drop = sink.tailNext - keep;
   if (drop <= 0) return false;
   gop_drop_front(&tail, drop);
   sink.tailNext -= drop;
@@ -144,7 +159,7 @@ static bool makeTailRoom() {
 
 static bool frozenNow() {
   xSemaphoreTake(lock, portMAX_DELAY);
-  bool f = gop.frozen;
+  bool f = gop.frozen || gopTrimmed;
   xSemaphoreGive(lock);
   return f;
 }
@@ -167,7 +182,8 @@ static void unfollow(Sink &s, char why) {
 static bool snapshot(uint32_t *gen, int *n, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts, const Sink *following) {
   xSemaphoreTake(lock, portMAX_DELAY);
   *gen = gop.gen;
-  if (gop.frozen && !(following && tailLive && following->onTail && following->followGen == gop.gen)) {
+  if ((gop.frozen && !(following && tailLive && following->onTail && following->followGen == gop.gen)) ||
+      (gopTrimmed && !(following && following->followGen == gop.gen))) {
     *n = 0;
     *cfg_len = 0;
     xSemaphoreGive(lock);
@@ -279,12 +295,28 @@ static void streamStep(Sink &s) {
     if (!sendAu(s, cfg, cfg_len, VF_CONFIG, cfg_ts)) { s.txGen = UINT32_MAX; unfollow(s, 'c'); return; }
     s.followGen = gen;
   }
-  for (gop_au au; s.next < n && copyAu(s, gen, s.next, &au); s.next++)
+  for (gop_au au; s.next < n && copyAu(s, gen, s.next, &au); s.next++, dropSent(s))
     if (!sendAu(s, s.scratch, au.len, (au.idr ? VF_IDR : 0) | resumeFlag(s), au.ts)) { s.txGen = UINT32_MAX; unfollow(s, 'g'); return; }
   if (s.next < n) return;
   s.catchingUp = false;
   for (gop_au au; copyTail(s, gen, s.tailNext, &au); s.tailNext++)
     if (!sendAu(s, s.scratch, au.len, resumeFlag(s), au.ts)) { s.txGen = UINT32_MAX; unfollow(s, 't'); return; }
+}
+
+// Runs on the sink's task, which owns s.next (see GOP_DROP_SENT).
+static void dropSent(Sink &s) {
+  if (!GOP_DROP_SENT) return;
+  xSemaphoreTake(lock, portMAX_DELAY);
+  if (!gop.frozen && s.followGen == gop.gen && s.txGen == gop.gen && gop.used > GOP_CAP / 2) {
+    int drop = s.next - min(DROP_KEEP, s.next / 2);
+    if (drop > 0) {
+      gop_drop_front(&gop, drop);
+      s.next -= drop;
+      gopTrimmed = true;
+      droppedSent += drop;
+    }
+  }
+  xSemaphoreGive(lock);
 }
 
 static void videoTask(void *arg) {
@@ -342,6 +374,7 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
   xSemaphoreTake(lock, portMAX_DELAY);
   bool wasFrozen = gop.frozen, wasLive = tailLive;
   gop_push(&gop, au, len, idr, now);
+  if (idr) gopTrimmed = false;
   bool froze = gop.frozen && !wasFrozen;
   if (froze) {  // the tail runs for everyone: an app that reconnects goes on from it (resume)
     gop_clear(&tail);
@@ -379,7 +412,8 @@ VideoStats video_stats(char who) {
   bool fresh = millis() - statAt < 3000;  // mirroring stopped: report zeros, not stale numbers
   xSemaphoreTake(lock, portMAX_DELAY);
   uint32_t gopBytes = gop.used, overflows = gop.overflows;
-  bool frozen = gop.frozen && !(tailLive && sink.who == who && sink.onTail);
+  bool frozen = (gop.frozen && !(tailLive && sink.who == who && sink.onTail)) ||
+                (gopTrimmed && !(sink.who == who && sink.followGen == gop.gen));
   xSemaphoreGive(lock);
   uint32_t age = lastAu ? millis() - lastAu : 0;
   return {fresh ? statKbps : 0, statIdrMs, gopBytes, age, fresh ? statFps : 0, overflows, frozen};
@@ -389,10 +423,10 @@ String video_debug() {
   char b[96];
   xSemaphoreTake(lock, portMAX_DELAY);
   // short: a BLE reply is one notification (a 200-char line never arrived, 2026-11-03)
-  snprintf(b, sizeof b, "fz%d tl%d tt%d tn%d ot%d fg%d nx%d/%d tx%d cu%d uf%c %lus tb%lu", gop.frozen, tailLive,
+  snprintf(b, sizeof b, "fz%d tl%d tt%d tn%d ot%d fg%d nx%d/%d tx%d cu%d uf%c %lus tb%lu dr%lu", gop.frozen, tailLive,
            tailTrimmed, tail.n, sink.onTail, sink.followGen == gop.gen, sink.next, gop.n, sink.tailNext,
            sink.catchingUp, lastWhy, (unsigned long)(lastWhyAt ? (millis() - lastWhyAt) / 1000 : 0),
-           (unsigned long)tailBreaks);
+           (unsigned long)tailBreaks, (unsigned long)droppedSent);
   xSemaphoreGive(lock);
   return b;
 }

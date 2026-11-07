@@ -188,6 +188,20 @@ String run(const String &line) {
   } else if (cmd == "release") { hidMouseButton(false); reply = "ok";
   } else if (cmd == "click") { hidMouseButton(true); delay(60); hidMouseButton(false); reply = "ok";
   } else if (cmd == "scroll") { hidMouseMove(0, 0, a, b); reply = "ok";
+  } else if (cmd == "burst") {  // `burst 2,4,8,16,...`: one vertical report per number (-127..127), paced like move.
+    // move is capped at STEP per report (a constant, slow pace); this lets a swipe start slowly and speed up like a finger.
+    const char *p = arg.c_str();
+    for (int n = 0; n < 200; n++) {
+      char *end;
+      long v = strtol(p, &end, 10);
+      if (end == p) break;
+      hidMouseMove(0, constrain(v, -127, 127));
+      delay(ble ? BLE_STEP_MS : STEP_MS);
+      if (ble) esp_task_wdt_reset();
+      p = end;
+      while (*p == ',' || *p == ' ') p++;
+    }
+    reply = "ok";
   } else if (cmd == "type") { hidType(arg); reply = "ok";
   } else if (cmd == "key") { reply = pressCombo(arg) ? "ok" : "err unknown key";
   } else if (cmd == "homescreen") { hidHomeKey(); reply = "ok"; }
@@ -420,6 +434,10 @@ void setup() {
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), resetReason());
 }
 
+static bool serialPress = false;     // the button is held by a press that came over USB serial
+static uint32_t serialLastMs = 0;    // last serial command
+const uint32_t SERIAL_PRESS_MS = 5000;
+
 void loop() {
   static bool linked = false, cliLinked = false;
   esp_task_wdt_reset();
@@ -433,7 +451,14 @@ void loop() {
     video_stream(false, FROM_APP);
   }
   // iOS keeps the Bluetooth mouse's link up without the app: a crashed app must not leave the button held either.
-  if (app && !ble_app_alive() && arb_gone(&arb, ARB_APP)) hidMouseButton(false);
+  // A press from USB serial (tools/drive on a Mac) is not the app's: ble_app_connected() is true for the phone's own
+  // mouse link, so this used to let go of every serial press before its first move, and drags never held.
+  if (app && !ble_app_alive() && !serialPress && arb_gone(&arb, ARB_APP)) hidMouseButton(false);
+  // A Mac script that stopped mid-gesture: let go once serial has been quiet for a while.
+  if (serialPress && millis() - serialLastMs > SERIAL_PRESS_MS) {
+    serialPress = false;
+    if (arb_gone(&arb, ARB_APP)) hidMouseButton(false);
+  }
   // A new link or a change of route starts with nothing held on Bluetooth (USB let go when its host went away).
   static bool hidWasBle = false, hidWasReady = false;
   bool hidBle = hidOverBle(), hidReady = ble_hid_ready();
@@ -486,7 +511,11 @@ void loop() {
     if (line == "0 status") { Serial.println("0 " + statusJson(true, FROM_APP)); return; }
     int sp = line.indexOf(' ');
     String id = sp < 0 ? line : line.substring(0, sp);
-    Serial.println(id + " " + board(sp < 0 ? "" : line.substring(sp + 1), id, FROM_APP));
+    String cmdLine = sp < 0 ? "" : line.substring(sp + 1);
+    serialLastMs = millis();
+    if (cmdLine == "press") serialPress = true;
+    else if (cmdLine == "release" || cmdLine == "click") serialPress = false;
+    Serial.println(id + " " + board(cmdLine, id, FROM_APP));
     return;
   }
   char who;
